@@ -31,18 +31,17 @@ import site.ycsb.DB;
 import site.ycsb.DBException;
 import site.ycsb.Status;
 import site.ycsb.StringByteIterator;
-import redis.clients.jedis.BasicCommands;
-import redis.clients.jedis.HostAndPort;
+import redis.clients.jedis.commands.BasicCommands;
 import redis.clients.jedis.Jedis;
-import redis.clients.jedis.JedisCluster;
-import redis.clients.jedis.JedisCommands;
+import redis.clients.jedis.commands.JedisCommands;
+import redis.clients.jedis.commands.ProtocolCommand;
 import redis.clients.jedis.Protocol;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
@@ -59,6 +58,12 @@ public class RedisClient extends DB {
 
   private JedisCommands jedis;
   private boolean scanIndexEnabled = true;
+  private boolean replaceOnly;
+  private static final byte[] HREPLACE_BYTES =
+      "KEYLANE.HREPLACE".getBytes(StandardCharsets.US_ASCII);
+  private static final ProtocolCommand HREPLACE = () -> HREPLACE_BYTES;
+  /** Experimental Keylane extension; does not change INSERT or scan indexing. */
+  public static final String UPDATE_COMMAND_PROPERTY = "redis.updatecommand";
 
   public static final String HOST_PROPERTY = "redis.host";
   public static final String PORT_PROPERTY = "redis.port";
@@ -86,6 +91,18 @@ public class RedisClient extends DB {
   }
 
   private void configureScanIndex(Properties props) throws DBException {
+    String updateCommand = props.getProperty(UPDATE_COMMAND_PROPERTY, "hmset")
+        .trim().toLowerCase(Locale.ROOT);
+    if (!"hmset".equals(updateCommand) && !"keylane.hreplace".equals(updateCommand)) {
+      throw new DBException("Invalid redis.updatecommand: " + updateCommand);
+    }
+    replaceOnly = "keylane.hreplace".equals(updateCommand);
+    if (Boolean.parseBoolean(props.getProperty(CLUSTER_PROPERTY, "false"))) {
+      throw new DBException("Experimental Keylane binding requires redis.cluster=false");
+    }
+    if (replaceOnly && !Boolean.parseBoolean(props.getProperty("writeallfields", "false"))) {
+      throw new DBException("KEYLANE.HREPLACE binding requires writeallfields=true");
+    }
     String scanIndex = props.getProperty(SCAN_INDEX_PROPERTY,
         SCAN_INDEX_PROPERTY_DEFAULT).trim().toLowerCase(Locale.ROOT);
     if (SCAN_INDEX_ZSET.equals(scanIndex)) {
@@ -113,20 +130,13 @@ public class RedisClient extends DB {
     }
     String host = props.getProperty(HOST_PROPERTY);
 
-    boolean clusterEnabled = Boolean.parseBoolean(props.getProperty(CLUSTER_PROPERTY));
-    if (clusterEnabled) {
-      Set<HostAndPort> jedisClusterNodes = new HashSet<>();
-      jedisClusterNodes.add(new HostAndPort(host, port));
-      jedis = new JedisCluster(jedisClusterNodes);
+    String redisTimeout = props.getProperty(TIMEOUT_PROPERTY);
+    if (redisTimeout != null) {
+      jedis = new Jedis(host, port, Integer.parseInt(redisTimeout));
     } else {
-      String redisTimeout = props.getProperty(TIMEOUT_PROPERTY);
-      if (redisTimeout != null){
-        jedis = new Jedis(host, port, Integer.parseInt(redisTimeout));
-      } else {
-        jedis = new Jedis(host, port);
-      }
-      ((Jedis) jedis).connect();
+      jedis = new Jedis(host, port);
     }
+    ((Jedis) jedis).connect();
 
     String password = props.getProperty(PASSWORD_PROPERTY);
     if (password != null) {
@@ -201,6 +211,20 @@ public class RedisClient extends DB {
   @Override
   public Status update(String table, String key,
       Map<String, ByteIterator> values) {
+    if (replaceOnly) {
+      Map<String, String> fields = StringByteIterator.getStringMap(values);
+      String[] args = new String[1 + fields.size() * 2];
+      args[0] = key;
+      int position = 1;
+      for (Map.Entry<String, String> field : fields.entrySet()) {
+        args[position++] = field.getKey();
+        args[position++] = field.getValue();
+      }
+      Jedis connection = (Jedis) jedis;
+      connection.getClient().sendCommand(HREPLACE, args);
+      String reply = connection.getClient().getStatusCodeReply();
+      return reply == null ? Status.NOT_FOUND : "OK".equals(reply) ? Status.OK : Status.ERROR;
+    }
     return jedis.hmset(key, StringByteIterator.getStringMap(values))
         .equals("OK") ? Status.OK : Status.ERROR;
   }

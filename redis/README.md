@@ -17,6 +17,24 @@ LICENSE file.
 
 ## Quick Start
 
+### Experimental Keylane whole-Hash replacement
+
+This branch is separate from the `redis-scanindex-none` upstream PR. It uses
+Jedis 3.9.0's public custom-command API; it does not modify that PR's dependency.
+
+`redis.updatecommand=hmset` (default) keeps the standard merge update.
+`redis.updatecommand=keylane.hreplace` sends `KEYLANE.HREPLACE` for UPDATE only:
+it replaces all fields of an existing Hash and maps a null reply to NOT_FOUND.
+INSERT still uses HMSET, and scan-index behavior is unchanged. The extension
+requires `writeallfields=true`; this experimental branch supports standalone
+connections only (`redis.cluster=false`) in both modes. Ordinary Redis does
+not implement the extension. There is no silent fallback to HMSET or Lua.
+
+For a controlled comparison, use this same branch/Jedis version for both modes,
+keep `redis.scanindex=none`, and disclose the update command in every result.
+Compare HMSET with Aerospike UPDATE_ONLY and HREPLACE with REPLACE_ONLY; do not
+label extension results as standard Redis Hash-update performance.
+
 This section describes how to run YCSB on Redis. 
 
 ### 1. Start Redis

@@ -19,6 +19,8 @@ package site.ycsb.db;
 
 import org.junit.Test;
 import redis.clients.jedis.Jedis;
+import redis.clients.jedis.Client;
+import redis.clients.jedis.commands.ProtocolCommand;
 import site.ycsb.ByteIterator;
 import site.ycsb.DBException;
 import site.ycsb.Status;
@@ -34,6 +36,59 @@ import static org.junit.Assert.fail;
 
 /** Tests the optional Redis scan-index behavior without a live server. */
 public class RedisClientTest {
+  @Test
+  public void replacementUsesExtensionOnlyForUpdateAndReportsMissing() throws Exception {
+    FakeJedis jedis = new FakeJedis();
+    Properties props = properties("none");
+    props.setProperty(RedisClient.UPDATE_COMMAND_PROPERTY, "keylane.hreplace");
+    props.setProperty("writeallfields", "true");
+    RedisClient client = new RedisClient(jedis, props);
+    assertEquals(Status.OK, client.insert("usertable", "user1", values()));
+    assertEquals(1, jedis.hmsetCalls);
+    assertEquals(Status.OK, client.update("usertable", "user1", values()));
+    assertEquals("KEYLANE.HREPLACE", jedis.raw.command);
+    assertEquals("user1", jedis.raw.args[0]);
+    assertEquals("field0", jedis.raw.args[1]);
+    assertEquals("value0", jedis.raw.args[2]);
+    assertEquals(1, jedis.hmsetCalls);
+    jedis.raw.reply = null;
+    assertEquals(Status.NOT_FOUND, client.update("usertable", "missing", values()));
+  }
+
+  @Test
+  public void replacementRejectsPartialFieldsAndCluster() throws Exception {
+    for (boolean cluster : new boolean[]{false, true}) {
+      Properties props = properties("none");
+      props.setProperty(RedisClient.UPDATE_COMMAND_PROPERTY, "keylane.hreplace");
+      props.setProperty("writeallfields", Boolean.toString(cluster));
+      props.setProperty("redis.cluster", Boolean.toString(cluster));
+      try {
+        new RedisClient(new FakeJedis(), props);
+        fail("unsupported replacement configuration accepted");
+      } catch (DBException expected) {
+        assertEquals(cluster
+            ? "Experimental Keylane binding requires redis.cluster=false"
+            : "KEYLANE.HREPLACE binding requires writeallfields=true", expected.getMessage());
+      }
+    }
+  }
+
+  private static final class FakeClient extends Client {
+    private String command;
+    private String[] args;
+    private String reply = "OK";
+
+    @Override
+    public void sendCommand(ProtocolCommand value, String... arguments) {
+      command = new String(value.getRaw(), java.nio.charset.StandardCharsets.US_ASCII);
+      args = arguments;
+    }
+
+    @Override
+    public String getStatusCodeReply() {
+      return reply;
+    }
+  }
 
   @Test
   public void noIndexModeSkipsIndexWritesAndRejectsScans() throws Exception {
@@ -84,6 +139,12 @@ public class RedisClientTest {
   }
 
   private static final class FakeJedis extends Jedis {
+    private final FakeClient raw = new FakeClient();
+
+    @Override
+    public Client getClient() {
+      return raw;
+    }
     private int hmsetCalls;
     private int delCalls;
     private int zaddCalls;
