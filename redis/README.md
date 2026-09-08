@@ -59,8 +59,8 @@ plan to run.
 - `redis.password`
   * Don't set the password if redis auth is disabled.
 - `redis.cluster`
-  * Set the cluster parameter to `true` if redis cluster mode is enabled.
-  * Default is `false`.
+  * Must remain `false` on this standalone-only experimental branch.
+  * The separate `redis-scanindex-none` PR retains its original cluster support.
 - `redis.scanindex`
   * `zset` maintains the historical global `_indices` sorted set and supports
     scans. This is the default for compatibility.
