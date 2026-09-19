@@ -50,7 +50,7 @@ Requires a JDK (Java 8 or later), Maven 3, and a running Lavik server supporting
 `LAVIK.HREPLACE`.
 
 ```sh
-mvn -pl site.ycsb:lavik-binding -am clean package
+mvn -Psource-run -pl site.ycsb:lavik-binding -am clean package
 
 bin/ycsb.sh load lavik -s -P workloads/workloada \
   -p lavik.host=127.0.0.1 -p lavik.port=6379 \
@@ -60,6 +60,9 @@ bin/ycsb.sh run lavik -s -P workloads/workloada \
   -p lavik.host=127.0.0.1 -p lavik.port=6379 \
   -p recordcount=1000 -p operationcount=10000 -p writeallfields=true
 ```
+
+`-Psource-run` stages the core runtime dependencies needed by `bin/ycsb.sh`
+when launching from a source checkout.
 
 The standalone archive is
 `lavik/target/ycsb-lavik-binding-0.18.0-SNAPSHOT.tar.gz`; the same `bin/ycsb.sh`
