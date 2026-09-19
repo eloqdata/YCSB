@@ -194,6 +194,7 @@ LICENSE file.
     <module>orientdb</module>
     <module>postgrenosql</module>
     <module>rados</module>
+    <module>lavik</module>
     <module>redis</module>
     <module>rest</module>
     <module>riak</module>

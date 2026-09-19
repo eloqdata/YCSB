@@ -22,6 +22,13 @@ YCSB
 
 
 
+Lavik binding
+-------------
+
+This fork provides a dedicated [Lavik binding](lavik/README.md) with no scan
+index, HSET partial updates, and whole-Hash updates via `LAVIK.HREPLACE`.
+Use `bin/ycsb.sh ... lavik`.
+
 Links
 -----
 * To get here, use https://ycsb.site
