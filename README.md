@@ -29,6 +29,12 @@ This fork provides a dedicated [Lavik binding](lavik/README.md) with no scan
 index, HSET partial updates, and whole-Hash updates via `LAVIK.HREPLACE`.
 Use `bin/ycsb.sh ... lavik`.
 
+EloqDoc binding
+---------------
+
+The [EloqDoc binding](eloqdoc/README.md) uses MongoDB's wire protocol and
+retries EloqDoc memory and transaction conflicts. Use `bin/ycsb.sh ... eloqdoc`.
+
 Links
 -----
 * To get here, use https://ycsb.site

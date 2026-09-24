@@ -56,6 +56,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.Vector;
+import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -70,6 +71,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  *      driver</a>
  */
 public class MongoDbClient extends DB {
+
+  /** A hook for bindings that need to retry an entire MongoDB operation. */
+  protected <T> T execute(Callable<T> operation) throws Exception {
+    return operation.call();
+  }
 
   /** Used to include a field in a response. */
   private static final Integer INCLUDE = Integer.valueOf(1);
@@ -153,8 +159,8 @@ public class MongoDbClient extends DB {
       MongoCollection<Document> collection = database.getCollection(table);
 
       Document query = new Document("_id", key);
-      DeleteResult result =
-          collection.withWriteConcern(writeConcern).deleteOne(query);
+      DeleteResult result = execute(() ->
+          collection.withWriteConcern(writeConcern).deleteOne(query));
       if (result.wasAcknowledged() && result.getDeletedCount() == 0) {
         System.err.println("Nothing deleted for key " + key);
         return Status.NOT_FOUND;
@@ -265,10 +271,11 @@ public class MongoDbClient extends DB {
           // this is effectively an insert, but using an upsert instead due
           // to current inability of the framework to clean up after itself
           // between test runs.
-          collection.replaceOne(new Document("_id", toInsert.get("_id")),
-              toInsert, REPLACE_WITH_UPSERT);
+          execute(() -> collection.replaceOne(
+              new Document("_id", toInsert.get("_id")), toInsert,
+              REPLACE_WITH_UPSERT));
         } else {
-          collection.insertOne(toInsert);
+          execute(() -> collection.insertOne(toInsert));
         }
       } else {
         bulkInserts.add(toInsert);
@@ -281,9 +288,9 @@ public class MongoDbClient extends DB {
                   new Document("_id", doc.get("_id")),
                   new Document("$set", doc), UPDATE_WITH_UPSERT));
             }
-            collection.bulkWrite(updates);
+            execute(() -> collection.bulkWrite(updates));
           } else {
-            collection.insertMany(bulkInserts, INSERT_UNORDERED);
+            execute(() -> collection.insertMany(bulkInserts, INSERT_UNORDERED));
           }
           bulkInserts.clear();
         } else {
@@ -331,7 +338,7 @@ public class MongoDbClient extends DB {
         findIterable.projection(projection);
       }
 
-      Document queryResult = findIterable.first();
+      Document queryResult = execute(() -> findIterable.first());
 
       if (queryResult != null) {
         fillMap(result, queryResult);
@@ -364,7 +371,6 @@ public class MongoDbClient extends DB {
   @Override
   public Status scan(String table, String startkey, int recordcount,
       Set<String> fields, Vector<HashMap<String, ByteIterator>> result) {
-    MongoCursor<Document> cursor = null;
     try {
       MongoCollection<Document> collection = database.getCollection(table);
 
@@ -383,33 +389,34 @@ public class MongoDbClient extends DB {
         findIterable.projection(projection);
       }
 
-      cursor = findIterable.iterator();
+      Vector<HashMap<String, ByteIterator>> scanned = execute(() -> {
+          Vector<HashMap<String, ByteIterator>> rows = new Vector<>();
+          MongoCursor<Document> cursor = null;
+          try {
+            cursor = findIterable.iterator();
+            while (cursor.hasNext()) {
+              HashMap<String, ByteIterator> row = new HashMap<>();
+              fillMap(row, cursor.next());
+              rows.add(row);
+            }
+          } finally {
+            if (cursor != null) {
+              cursor.close();
+            }
+          }
+          return rows;
+        });
 
-      if (!cursor.hasNext()) {
+      if (scanned.isEmpty()) {
         System.err.println("Nothing found in scan for key " + startkey);
         return Status.ERROR;
       }
-
-      result.ensureCapacity(recordcount);
-
-      while (cursor.hasNext()) {
-        HashMap<String, ByteIterator> resultMap =
-            new HashMap<String, ByteIterator>();
-
-        Document obj = cursor.next();
-        fillMap(resultMap, obj);
-
-        result.add(resultMap);
-      }
+      result.addAll(scanned);
 
       return Status.OK;
     } catch (Exception e) {
       System.err.println(e.toString());
       return Status.ERROR;
-    } finally {
-      if (cursor != null) {
-        cursor.close();
-      }
     }
   }
 
@@ -440,7 +447,7 @@ public class MongoDbClient extends DB {
       }
       Document update = new Document("$set", fieldsToSet);
 
-      UpdateResult result = collection.updateOne(query, update);
+      UpdateResult result = execute(() -> collection.updateOne(query, update));
       if (result.wasAcknowledged() && result.getMatchedCount() == 0) {
         System.err.println("Nothing updated for key " + key);
         return Status.NOT_FOUND;
