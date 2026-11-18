@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2012 YCSB contributors. All rights reserved.
+ * Copyright (c) 2012-2026 YCSB contributors. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you
  * may not use this file except in compliance with the License. You
@@ -18,8 +18,10 @@
 /**
  * Redis client binding for YCSB.
  *
- * All YCSB records are mapped to a Redis *hash field*.  For scanning
- * operations, all keys are saved (by an arbitrary hash) in a sorted set.
+ * All YCSB records are mapped to Redis hashes. For scanning operations, keys
+ * can be saved (by an arbitrary hash) in a sorted set. The index can be
+ * disabled for workloads that do not scan, avoiding an extra write and a
+ * global hot key.
  */
 
 package site.ycsb.db;
@@ -28,7 +30,7 @@ import site.ycsb.ByteIterator;
 import site.ycsb.DB;
 import site.ycsb.DBException;
 import site.ycsb.Status;
-import site.ycsb.ByteArrayByteIterator;
+import site.ycsb.StringByteIterator;
 import redis.clients.jedis.BasicCommands;
 import redis.clients.jedis.HostAndPort;
 import redis.clients.jedis.Jedis;
@@ -41,6 +43,9 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.Set;
 import java.util.Vector;
@@ -53,18 +58,52 @@ import java.util.Vector;
 public class RedisClient extends DB {
 
   private JedisCommands jedis;
+  private boolean scanIndexEnabled = true;
 
   public static final String HOST_PROPERTY = "redis.host";
   public static final String PORT_PROPERTY = "redis.port";
   public static final String PASSWORD_PROPERTY = "redis.password";
   public static final String CLUSTER_PROPERTY = "redis.cluster";
   public static final String TIMEOUT_PROPERTY = "redis.timeout";
+  /** Selects whether the binding maintains the sorted-set scan index. */
+  public static final String SCAN_INDEX_PROPERTY = "redis.scanindex";
+  /** Preserves the historical binding behavior, including scan support. */
+  public static final String SCAN_INDEX_ZSET = "zset";
+  /** Skips index maintenance and makes scan operations unsupported. */
+  public static final String SCAN_INDEX_NONE = "none";
+  /** Keeps existing users compatible unless they explicitly opt out. */
+  public static final String SCAN_INDEX_PROPERTY_DEFAULT = SCAN_INDEX_ZSET;
 
   public static final String INDEX_KEY = "_indices";
+
+  /** Creates a Redis binding that YCSB will initialize from its properties. */
+  public RedisClient() {
+  }
+
+  RedisClient(JedisCommands jedis, Properties props) throws DBException {
+    this.jedis = jedis;
+    configureScanIndex(props);
+  }
+
+  private void configureScanIndex(Properties props) throws DBException {
+    String scanIndex = props.getProperty(SCAN_INDEX_PROPERTY,
+        SCAN_INDEX_PROPERTY_DEFAULT).trim().toLowerCase(Locale.ROOT);
+    if (SCAN_INDEX_ZSET.equals(scanIndex)) {
+      scanIndexEnabled = true;
+    } else if (SCAN_INDEX_NONE.equals(scanIndex)) {
+      scanIndexEnabled = false;
+    } else {
+      throw new DBException("Invalid " + SCAN_INDEX_PROPERTY + ": "
+          + scanIndex + "; expected " + SCAN_INDEX_ZSET + " or "
+          + SCAN_INDEX_NONE);
+    }
+  }
 
   public void init() throws DBException {
     Properties props = getProperties();
     int port;
+
+    configureScanIndex(props);
 
     String portString = props.getProperty(PORT_PROPERTY);
     if (portString != null) {
@@ -103,24 +142,6 @@ public class RedisClient extends DB {
     }
   }
 
-  private interface RedisOp<T> {
-    T run() throws Exception;
-  }
-
-  private <T> T retryForever(RedisOp<T> op) {
-    for (;;) {
-      try {
-        return op.run();
-      } catch (Exception e) {
-        try {
-          Thread.sleep(3 * 60 * 1000L);
-        } catch (InterruptedException ex) {
-          Thread.currentThread().interrupt();
-        }
-      }
-    }
-  }
-
   /*
    * Calculate a hash for a key to store it in an index. The actual return value
    * of this function is not interesting -- it primarily needs to be fast and
@@ -135,48 +156,72 @@ public class RedisClient extends DB {
 
   @Override
   public Status read(String table, String key, Set<String> fields,
-                     Map<String, ByteIterator> result) {
-    try {
-      return retryForever(() -> {
-          byte[] value = ((Jedis) jedis).get(key.getBytes());
-          if (value == null) {
-            return Status.NOT_FOUND;
-          }
-          result.put("value", new ByteArrayByteIterator(value));
-          return Status.OK;
-        });
-    } catch (Exception e) {
-      return Status.ERROR;
+      Map<String, ByteIterator> result) {
+    if (fields == null) {
+      StringByteIterator.putAllAsByteIterators(result, jedis.hgetAll(key));
+    } else {
+      String[] fieldArray =
+          (String[]) fields.toArray(new String[fields.size()]);
+      List<String> values = jedis.hmget(key, fieldArray);
+
+      Iterator<String> fieldIterator = fields.iterator();
+      Iterator<String> valueIterator = values.iterator();
+
+      while (fieldIterator.hasNext() && valueIterator.hasNext()) {
+        result.put(fieldIterator.next(),
+            new StringByteIterator(valueIterator.next()));
+      }
+      assert !fieldIterator.hasNext() && !valueIterator.hasNext();
     }
+    return result.isEmpty() ? Status.ERROR : Status.OK;
   }
 
   @Override
-  public Status insert(String table, String key, Map<String, ByteIterator> values) {
-    try {
-      return retryForever(() -> {
-          ByteIterator v = values.values().iterator().next();
-          String reply = ((Jedis) jedis).set(key.getBytes(), v.toArray());
-          return ("OK".equals(reply) ? Status.OK : Status.ERROR);
-        });
-    } catch (Exception e) {
-      return Status.ERROR;
+  public Status insert(String table, String key,
+      Map<String, ByteIterator> values) {
+    if (jedis.hmset(key, StringByteIterator.getStringMap(values))
+        .equals("OK")) {
+      if (scanIndexEnabled) {
+        jedis.zadd(INDEX_KEY, hash(key), key);
+      }
+      return Status.OK;
     }
+    return Status.ERROR;
   }
 
   @Override
   public Status delete(String table, String key) {
-    return Status.NOT_IMPLEMENTED;
-  }
-
-
-  @Override
-  public Status update(String table, String key, Map<String, ByteIterator> values) {
-    return Status.NOT_IMPLEMENTED;
+    if (!scanIndexEnabled) {
+      return jedis.del(key) == 0 ? Status.ERROR : Status.OK;
+    }
+    return jedis.del(key) == 0 && jedis.zrem(INDEX_KEY, key) == 0 ? Status.ERROR
+        : Status.OK;
   }
 
   @Override
-  public Status scan(String table, String startKey, int recordCount,
-                     Set<String> fields, Vector<HashMap<String, ByteIterator>> result) {
-    return Status.NOT_IMPLEMENTED;
+  public Status update(String table, String key,
+      Map<String, ByteIterator> values) {
+    return jedis.hmset(key, StringByteIterator.getStringMap(values))
+        .equals("OK") ? Status.OK : Status.ERROR;
   }
+
+  @Override
+  public Status scan(String table, String startkey, int recordcount,
+      Set<String> fields, Vector<HashMap<String, ByteIterator>> result) {
+    if (!scanIndexEnabled) {
+      return Status.NOT_IMPLEMENTED;
+    }
+    Set<String> keys = jedis.zrangeByScore(INDEX_KEY, hash(startkey),
+        Double.POSITIVE_INFINITY, 0, recordcount);
+
+    HashMap<String, ByteIterator> values;
+    for (String key : keys) {
+      values = new HashMap<String, ByteIterator>();
+      read(table, key, fields, values);
+      result.add(values);
+    }
+
+    return Status.OK;
+  }
+
 }
